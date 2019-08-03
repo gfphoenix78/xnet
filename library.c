@@ -37,14 +37,14 @@ int Dial(const char *network, const char *address)
     return -1;
 }
 int DialTimeout(const char *network, const char *address, int ms);
-int Listen(const char *network, const char *address, int *fds, int fd_n)
+int Listen(const char *network, const char *address)
 {
-    if (!network || !fds || fd_n<1) {
-        log_error("invalid parameters: network(%s),fds(%s),fd_n(%s)", network, fds, fd_n);
+    if (!network) {
+        log_error("invalid parameters: network(%s)", network);
         return -1;
     }
     switch(network[0]) {
-        case 't': return ListenTCP(network, address, fds, fd_n);
+        case 't': return ListenTCP(network, address);
         case 'u':
 //            return network[1]=='d' ? DialUDP(network, address) : DialUnix(network, address);
         default:
@@ -186,17 +186,17 @@ int DialUnix(const char *network, const char *address)
     return -1;
 }
 
-int ListenTCP(const char *network, const char *address, int *fds, int fd_n)
+int ListenTCP(const char *network, const char *address)
 {
-    if (!network || !address || !fds || fd_n<1) {
-        log_error("invalid parameters: network(%s), address(%s), fds(%p), fd_n(%d)",
-                network, address, fds, fd_n);
+    if (!network || !address) {
+        log_error("invalid parameters: network(%s), address(%s)",
+                network, address);
         return -1;
     }
     char node_service[600], *node, *service;
     struct addrinfo hints;
     struct addrinfo *result, *rp;
-    int rc, count=0;
+    int rc, fd=-1;
     memset(&hints, 0, sizeof(hints));
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE | AI_V4MAPPED;
@@ -225,32 +225,24 @@ int ListenTCP(const char *network, const char *address, int *fds, int fd_n)
         return -1;
     }
 
-    for (rp = result; rp != NULL && count < fd_n; rp = rp->ai_next) {
-        fds[count] = socket(rp->ai_family, rp->ai_socktype,
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        fd = socket(rp->ai_family, rp->ai_socktype,
                     rp->ai_protocol);
-        if (fds[count] == -1)
+        if (fd == -1)
             continue;
 
-        if (bind(fds[count], rp->ai_addr, rp->ai_addrlen) == 0) {
-            if (listen(fds[count], 128) == 0) {
-                count++;
-                continue;
-            }
+        if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            if (listen(fd, 128) == 0)
+                break;
         }
-        close(fds[count]);
+        close(fd);
     }
 
     freeaddrinfo(result);           /* No longer needed */
-
-    if (count == 0) {               /* No address succeeded */
-        log_error("Could not bind\n");
-        return -1;
-    }
-
-    return count;
+    return fd;
 }
 // if address is not null, bind address to the socket, so
-int ListenUDP(const char *network, const char *address, int *fds, int fd_n)
+int ListenUDP(const char *network, const char *address)
 {
 
     return -1;
