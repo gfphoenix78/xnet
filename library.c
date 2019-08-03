@@ -77,6 +77,7 @@ int DialTCP(const char *network, const char *address)
     int fd, rc;
     memset(&hints, 0, sizeof(hints));
     hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_V4MAPPED;
     if (strcmp(network, "tcp") == 0) {
         hints.ai_family = AF_UNSPEC;
     } else if (strcmp(network, "tcp4") == 0) {
@@ -198,7 +199,7 @@ int ListenTCP(const char *network, const char *address, int *fds, int fd_n)
     int rc, count=0;
     memset(&hints, 0, sizeof(hints));
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
+    hints.ai_flags = AI_PASSIVE | AI_V4MAPPED;
     if (strcmp(network, "tcp") == 0) {
         hints.ai_family = AF_UNSPEC;
     } else if (strcmp(network, "tcp4") == 0) {
@@ -215,6 +216,8 @@ int ListenTCP(const char *network, const char *address, int *fds, int fd_n)
         return -1;
     }
     node = node_service[0]=='\0' ? NULL : node_service;
+    if (!node && hints.ai_family == AF_UNSPEC)
+        hints.ai_family = AF_INET6;
 
     rc = getaddrinfo(node, service, &hints, &result);
     if (rc != 0) {
