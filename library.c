@@ -1,15 +1,15 @@
 #include "library.h"
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/errno.h>
+#include <sys/fcntl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <string.h>
 #include <netdb.h>
 #include <unistd.h>
-
-void hello(void) {
-    printf("Hello, World!\n");
-}
 
 static void log_error(const char *fmt, ...)
 {
@@ -17,6 +17,8 @@ static void log_error(const char *fmt, ...)
     va_start(ap, fmt);
     vprintf(fmt, ap);
     va_end(ap);
+    if (fmt[strlen(fmt)-1] != '\n')
+        printf("\n");
 }
 
 // network: tcp, tcp4, tcp6, udp, udp4, udp6, ip, ip4, ip6, unix, unixgram, unixpacket
@@ -30,23 +32,27 @@ int Dial(const char *network, const char *address)
     switch(network[0]) {
         case 't': return DialTCP(network, address);
         case 'u':
-            return network[1]=='d' ? DialUDP(network, address) : DialUnix(network, address);
+            return network[1]=='d' ? DialUDP(network, NULL, address) : DialUnix(network, address);
         default:
             break;
     }
     return -1;
 }
-int DialTimeout(const char *network, const char *address, int ms);
+int DialTimeout(const char *network, const char *address, int ms)
+{
+    return -1;
+}
 int Listen(const char *network, const char *address)
 {
     if (!network) {
-        log_error("invalid parameters: network(%s)", network);
+        log_error("null network");
         return -1;
     }
     switch(network[0]) {
         case 't': return ListenTCP(network, address);
         case 'u':
-//            return network[1]=='d' ? DialUDP(network, address) : DialUnix(network, address);
+            return network[1]=='d' ? ListenUDP(network, address)
+                    : ListenUnix(network, address);
         default:
             break;
     }
@@ -69,8 +75,6 @@ static char *split_address(const char *address, char *node_service)
 }
 int DialTCP(const char *network, const char *address)
 {
-    if (!network || !address)
-        return -1;
     char node_service[600], *node, *service;
     struct addrinfo hints;
     struct addrinfo *result, *rp;
@@ -115,14 +119,16 @@ int DialTCP(const char *network, const char *address)
     freeaddrinfo(result);           /* No longer needed */
 
     if (rp == NULL) {               /* No address succeeded */
-        log_error("Could not bind\n");
+        log_error("Could not bind(%s)\n", strerror(errno));
         return -1;
     }
 
     return fd;
 }
 // if address is not null, call connect to bind this address to the created socket
-int DialUDP(const char *network, const char *address)
+// FIXME: local_address used to bind to local address
+// FIXME: remote_address is used to connect to the server address
+int DialUDP(const char *network, const char *local_address, const char *remote_address)
 {
     if (!network)
         return -1;
@@ -142,14 +148,14 @@ int DialUDP(const char *network, const char *address)
         log_error("invalid network:%s\n", network);
         return -1;
     }
-    if (!address) {
+    if (!remote_address) {
         fd = socket(hints.ai_family, hints.ai_socktype, hints.ai_protocol);
         goto out;
     }
 
-    service = split_address(address, node_service);
+    service = split_address(remote_address, node_service);
     if (!service) {
-        log_error("bad address(%s)\n", address);
+        log_error("bad address(%s)\n", remote_address);
         return -1;
     }
     node = node_service[0]=='\0' ? NULL : node_service;
@@ -183,6 +189,45 @@ out:
 }
 int DialUnix(const char *network, const char *address)
 {
+    struct sockaddr_un sockaddr;
+    int fd, sotype;
+    socklen_t socklen;
+    if (!network || !address) {
+        log_error("null network or address");
+        return -1;
+    }
+    if (strcmp(network, "unix")==0)
+        sotype = SOCK_STREAM;
+    else if (strcmp(network, "unixgram")==0)
+        sotype = SOCK_DGRAM;
+    else if (strcmp(network, "unixpacket")==0)
+        sotype = SOCK_SEQPACKET;
+    else {
+        log_error("unknown network for unix-socket(%s)", network);
+        return -1;
+    }
+    if (strlen(address) >= sizeof(sockaddr.sun_path)) {
+        log_error("address(%s) is too long(%d)", address, strlen(address));
+        return -1;
+    }
+    fd = socket(AF_UNIX, sotype, 0);
+    if (fd == -1) {
+        log_error("socket failed:%s", strerror(errno));
+        return -1;
+    }
+
+    memset(&sockaddr, 0, sizeof(sockaddr));
+    sockaddr.sun_family = AF_UNIX;
+    strcpy(sockaddr.sun_path, address);
+    socklen = sizeof(sockaddr);
+    if (connect(fd, (const struct sockaddr*)&sockaddr, socklen)) {
+        log_error("connect error");
+        goto out;
+    }
+    return fd;
+
+out:
+    close(fd);
     return -1;
 }
 
@@ -246,4 +291,121 @@ int ListenUDP(const char *network, const char *address)
 {
 
     return -1;
+}
+int ListenUnix(const char *network, const char *address)
+{
+    int fd, sotype;
+    struct sockaddr_un sockaddr;
+    if (!network || !address) {
+        log_error("null parameters: network(%s), address(%s)", network, address);
+        return -1;
+    }
+    if (strcmp(network, "unix") == 0)
+        sotype = SOCK_STREAM;
+    else if (strcmp(network, "unixpacket") == 0)
+        sotype = SOCK_SEQPACKET;
+//    else if (strcmp(network, "unixgram") == 0)
+//        socktype = SOCK_DGRAM;
+    else {
+        log_error("unknown network(%s)", network);
+        return -1;
+    }
+    if (strlen(address) >= sizeof(sockaddr.sun_path)) {
+        log_error("address is too long(%d)", strlen(address));
+        return -1;
+    }
+    fd = socket(AF_UNIX, sotype, 0);
+    if (fd == -1) {
+        log_error("socket failed(%s)", strerror(errno));
+        return -1;
+    }
+    memset(&sockaddr, 0, sizeof(sockaddr));
+    sockaddr.sun_family = AF_UNIX;
+    strcpy(sockaddr.sun_path, address);
+    if (bind(fd, (const struct sockaddr*)&sockaddr, (socklen_t) sizeof(sockaddr)) == -1) {
+        log_error("bind error(%s)", strerror(errno));
+        goto out;
+    }
+    if (listen(fd, 128) == -1) {
+        log_error("listen error(%s)", strerror(errno));
+        goto out;
+    }
+    return fd;
+
+out:
+    close(fd);
+    return -1;
+}
+int set_default_sockopt(const char *network, int fd, char mode)
+{
+    return 0;
+}
+//// socket utility
+int setblock(int socket_fd, bool block)
+{
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags == 0) {
+        flags = block ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
+        flags = fcntl(socket_fd, F_SETFL, flags);
+    }
+    return flags;
+}
+//// zbytes
+
+struct zbytes *zb_init(struct zbytes *zb, int hint_capability)
+{
+    if (hint_capability<=0)
+        hint_capability = (1<<16)-8;
+    char *bb = malloc((size_t )hint_capability);
+    if (!bb)
+        return NULL;
+    zb->cap = hint_capability;
+    zb->pos = 0;zb->limit = 0;
+    zb->raw_buffer = bb;
+    return zb;
+}
+void zb_destroy(struct zbytes *zb)
+{
+    if (zb->raw_buffer) {
+        free(zb->raw_buffer);
+        zb->raw_buffer = NULL;
+    }
+    zb->pos = zb->limit = 0;
+}
+int zb_resize(struct zbytes *zb, size_t new_size)
+{
+    char *bb = realloc(zb->raw_buffer, new_size);
+    if (!bb)
+        return -1;
+    zb->raw_buffer = bb;
+    return 0;
+}
+void zb_move(struct zbytes *zb)
+{
+    if (zb->pos) {
+        if (zb->pos == zb->limit) {
+            zb->pos = zb->limit = 0;
+        } else {
+            char *bb = zb->raw_buffer;
+            int pos = zb->pos;
+            memmove(bb, bb + pos, zb->limit - pos);
+            zb->pos = 0;
+            zb->limit -= pos;
+        }
+    }
+}
+// TODO: how to handle this function
+int zb_appendSocket(int fd, struct zbytes *zb)
+{
+    int left = zb_free_size(zb);
+    ssize_t n;
+retry:
+    n = recv(fd, &zb->raw_buffer[zb->limit], (size_t)left, 0);
+    if (n==-1) {
+        if (errno==EINTR)
+            goto retry;
+        return -1;
+    }
+    zb->limit += n;
+    return (int)n;
 }
