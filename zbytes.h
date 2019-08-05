@@ -1,30 +1,6 @@
-#ifndef XNET_LIBRARY_H
-#define XNET_LIBRARY_H
-
-#include <assert.h>
-#include <stdbool.h>
-#include <stdlib.h>
-// ALL network is NOT NULL
-// ALL address is NOT NULL
-// return fd, -1 error
-int Dial(const char *network, const char *address);
-int DialTimeout(const char *network, const char *address, int ms);
-int Listen(const char *network, const char *address);
-
-int DialTCP(const char *network, const char *address);
-int DialUDP(const char *network, const char *local_address, const char *remote_address);
-int DialUnix(const char *network, const char *address);
-
-int ListenTCP(const char *network, const char *address);
-int ListenUDP(const char *network, const char *address);
-int ListenUnix(const char *network, const char *address);
-
-// mode is 'D' for dial, 'L' for listen
-int set_default_sockopt(const char *network, int fd, char mode);
-// socket utilities
-// 0 : success, -1 fail
-int setblock(int socket_fd, bool block);
-
+#ifndef XNET_ZBYTES_H_
+#define XNET_ZBYTES_H_
+#include <stddef.h>
 
 struct zbytes {
     char *raw_buffer;
@@ -70,4 +46,5 @@ typedef int (*zb_packet_processor_func)(char *data, int length);
 #define ZBF_XMEM        (1<<2)
 typedef int (*zb_packet_checker_func)(struct zbytes *zb);
 
-#endif
+
+#endif /* XNET_ZBYTES_H_ */
