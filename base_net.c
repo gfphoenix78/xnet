@@ -102,7 +102,7 @@ int DialTCP(const char *network, const char *address)
         log_error("getaddrinfo: %s\n", gai_strerror(rc));
         return -1;
     }
-
+    fd = -1;
     for (rp = result; rp != NULL; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype,
                      rp->ai_protocol);
@@ -219,7 +219,7 @@ int DialUnix(const char *network, const char *address)
     strcpy(sockaddr.sun_path, address);
     socklen = sizeof(sockaddr);
     if (connect(fd, (const struct sockaddr*)&sockaddr, socklen)) {
-        log_error("connect error");
+        log_error("connect error(%s)", strerror(errno));
         goto out;
     }
     return fd;
