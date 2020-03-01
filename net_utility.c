@@ -7,7 +7,7 @@ int set_default_sockopt(const char *network, int fd, char mode)
     return 0;
 }
 //// socket utility
-int setblock(int socket_fd, bool block)
+int set_nonblock(int socket_fd)
 {
     int flags = fcntl(socket_fd, F_GETFL, 0);
     if (flags == 0) {

@@ -1,4 +1,5 @@
 #include "base_net.h"
+#include <arpa/inet.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <sys/errno.h>
@@ -18,7 +19,74 @@ static void log_error(const char *fmt, ...)
     if (fmt[strlen(fmt)-1] != '\n')
         printf("\n");
 }
+static int split_address(const char *address, char *node, char *service)
+{
+    while (*address == ' ')
+        address++;
+    size_t n = strlen(address);
+    if (n>=600 || n<1)
+        return -1;
+    service[0] = '\0';
+    if (address[0] == '[') {
+        char *br = strchr(address, ']');
+        // invalid ipv6 address in brace, or empty in []
+        if (!br || address + 1 == br)
+            return -1;
+        memcpy(node, address + 1, br - address - 1);
+        node[br - address] = '\0';
+        if (br[1] == ':') {
+            strcpy(service, br+2);
+        } else if (br[1] != '\0') {
+            return -1;
+        }
+    } else {
+        char *br = strrchr(address, ':');
+        if (br) {
+            n = (size_t)(br - address);
+            memcpy(node, address, n);
+            node[n] = '\0';
+            strcpy(service, br + 1);
+        } else {
+            memcpy(node, address, n);
+        }
+    }
+    n = strlen(service);
+    for (int i = (int)(n - 1); i >= 0; i--) {
+        if (service[i] != ' ')
+            break;
+        service[i] = '\0';
+    }
+    if (service[0] == '\0') {
+        service[0] = '0';
+        service[1] = '\0';
+    }
+    return 0;
+}
 
+// format the sockaddr into buffer with style:
+// "xx.yy.zz.ww:port" for IPv4
+// "[::1]:port" for IPv6
+int format_sockaddr(const struct sockaddr *sa, char *buffer, int size)
+{
+    char        host[NI_MAXHOST];
+    char        port[NI_MAXSERV];
+    int rc;
+
+    rc = getnameinfo(sa, sa->sa_len,
+            host, sizeof(host),
+            port, sizeof(port),
+            NI_NUMERICHOST | NI_NUMERICSERV);
+    if (rc != 0) {
+        snprintf(buffer, size, "?host?:?port?");
+    } else {
+        if (sa->sa_family == AF_INET6)
+            snprintf(buffer, size, "[%s]:%s", host, port);
+        else
+            snprintf(buffer, size, "%s:%s", host, port);
+
+    }
+    return rc;
+}
 // network: tcp, tcp4, tcp6, udp, udp4, udp6, ip, ip4, ip6, unix, unixgram, unixpacket
 // address: tcp[4|6], udp[4|6] host:port, port must be number
 //          ip[4|6] not supported now
@@ -56,27 +124,82 @@ int Listen(const char *network, const char *address)
     }
     return -1;
 }
-static char *split_address(const char *address, char *node_service)
+static struct addrinfo *_getaddrinfo(const char *node_service, const struct addrinfo *hints)
 {
-    char *p;
-    int n = strlen(address);
-    if (n>=600 || n<5)
+    char node_[600], service[32];
+    char *node = node_;
+    struct addrinfo *result;
+    int rc;
+    rc = split_address(node_service, node_, service);
+    if (rc != 0)
         return NULL;
-    strcpy(node_service, address);
-    p = node_service + n-1;
-    while (*p != ':' && p>node_service)
-        --p;
-    if (*p != ':')
+    if (node_[0] == '\0' || strcmp(node_, "*") == 0)
+        node = NULL;
+    rc = getaddrinfo(node, service, hints, &result);
+    if (rc != 0)
         return NULL;
-    *p = '\0';
-    return p+1;
+    return result;
 }
-int DialTCP(const char *network, const char *address)
+static int _connect(const struct addrinfo *hints, const char *remote, setsockopt_fn fn)
 {
-    char node_service[600], *node, *service;
-    struct addrinfo hints;
     struct addrinfo *result, *rp;
-    int fd, rc;
+    int sockfd = -1;
+    result = _getaddrinfo(remote, hints);
+    if (!result)
+        return -1;
+    for (rp = result; rp; rp = rp->ai_next) {
+        sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sockfd == -1) continue;
+        if (!fn(sockfd))
+            goto cont;
+        if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0)
+            break;
+cont:
+        close(sockfd);
+    }
+    freeaddrinfo(result);
+    return rp ? sockfd : -1;
+}
+int BindConnect(const struct addrinfo *hints, const char *local, const char *remote, setsockopt_fn fn)
+{
+    struct addrinfo *result, *rp;
+    struct addrinfo *result_local, *rp_local;
+
+    char node_[600], service[32];
+    char *node = node_;
+    int rc, sockfd = -1;
+    if (!local)
+        return _connect(hints, remote, fn);
+    rp = NULL;
+    result_local = _getaddrinfo(local, hints);
+    if (!result_local)
+        return -1;
+    result = _getaddrinfo(remote, hints);
+    if (!result)
+        goto out1;
+    for (rp = result; rp; rp = rp->ai_next) {
+        sockfd = socket(hints->ai_family, hints->ai_socktype, hints->ai_protocol);
+        if (sockfd < 0)
+            return -1;
+        for (rp_local = result_local; rp_local; rp_local = rp_local->ai_next) {
+            if (fn && !fn(sockfd))
+                continue;
+            if (bind(sockfd, rp_local->ai_addr, rp_local->ai_addrlen) == 0)
+                break;
+        }
+        if (rp_local && connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0)
+            break;
+        // connect failed.
+        close(sockfd);
+    }
+    freeaddrinfo(result);
+out1:
+    freeaddrinfo(result_local);
+    return rp ? sockfd : -1;
+}
+int DialTCP_ex(const char *network, const char *local_address, const char *remote_address, setsockopt_fn fn)
+{
+    struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_V4MAPPED;
@@ -90,50 +213,16 @@ int DialTCP(const char *network, const char *address)
         log_error("invalid network:%s\n", network);
         return -1;
     }
-    service = split_address(address, node_service);
-    if (!service) {
-        log_error("bad address(%s)\n", address);
-        return -1;
-    }
-    node = node_service[0]=='\0' ? NULL : node_service;
-
-    rc = getaddrinfo(node, service, &hints, &result);
-    if (rc != 0) {
-        log_error("getaddrinfo: %s\n", gai_strerror(rc));
-        return -1;
-    }
-    fd = -1;
-    for (rp = result; rp != NULL; rp = rp->ai_next) {
-        fd = socket(rp->ai_family, rp->ai_socktype,
-                     rp->ai_protocol);
-        if (fd == -1)
-            continue;
-
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0)
-            break;                  /* Success */
-
-        close(fd);
-    }
-    freeaddrinfo(result);           /* No longer needed */
-
-    if (rp == NULL) {               /* No address succeeded */
-        log_error("Could not bind(%s)\n", strerror(errno));
-        return -1;
-    }
-
-    return fd;
+    return BindConnect(&hints, local_address, remote_address, fn);
 }
-// if address is not null, call connect to bind this address to the created socket
-// FIXME: local_address used to bind to local address
-// FIXME: remote_address is used to connect to the server address
-int DialUDP(const char *network, const char *local_address, const char *remote_address)
+
+int DialUDP_ex(const char *network, const char *local_address, const char *remote_address, setsockopt_fn fn)
 {
+    // assert(network != NULL)
+    // assert(remote_address != NULL)
     if (!network)
         return -1;
-    char node_service[600], *node, *service;
     struct addrinfo hints;
-    struct addrinfo *result, *rp;
-    int fd, rc;
     memset(&hints, 0, sizeof(hints));
     hints.ai_socktype = SOCK_DGRAM;
     if (strcmp(network, "udp") == 0) {
@@ -146,44 +235,7 @@ int DialUDP(const char *network, const char *local_address, const char *remote_a
         log_error("invalid network:%s\n", network);
         return -1;
     }
-    if (!remote_address) {
-        fd = socket(hints.ai_family, hints.ai_socktype, hints.ai_protocol);
-        goto out;
-    }
-
-    service = split_address(remote_address, node_service);
-    if (!service) {
-        log_error("bad address(%s)\n", remote_address);
-        return -1;
-    }
-    node = node_service[0]=='\0' ? NULL : node_service;
-
-    rc = getaddrinfo(node, service, &hints, &result);
-    if (rc != 0) {
-        log_error("getaddrinfo: %s\n", gai_strerror(rc));
-        return -1;
-    }
-
-    for (rp = result; rp != NULL; rp = rp->ai_next) {
-        fd = socket(rp->ai_family, rp->ai_socktype,
-                    rp->ai_protocol);
-        if (fd == -1)
-            continue;
-
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0)
-            break;                  /* Success */
-
-        close(fd);
-    }
-    freeaddrinfo(result);           /* No longer needed */
-
-    if (rp == NULL) {               /* No address succeeded */
-        log_error("Could not bind\n");
-        return -1;
-    }
-
-out:
-    return fd;
+    return BindConnect(&hints, local_address, remote_address, fn);
 }
 int DialUnix(const char *network, const char *address)
 {
@@ -236,10 +288,10 @@ int ListenTCP(const char *network, const char *address)
                 network, address);
         return -1;
     }
-    char node_service[600], *node, *service;
+    char node_[600], *node, service[32];
     struct addrinfo hints;
     struct addrinfo *result, *rp;
-    int rc, fd=-1;
+    int rc, sockfd=-1;
     memset(&hints, 0, sizeof(hints));
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE | AI_V4MAPPED;
@@ -253,14 +305,12 @@ int ListenTCP(const char *network, const char *address)
         log_error("invalid network:%s\n", network);
         return -1;
     }
-    service = split_address(address, node_service);
-    if (!service) {
+    rc = split_address(address, node_, service);
+    if (rc != 0) {
         log_error("bad address(%s)\n", address);
         return -1;
     }
-    node = node_service[0]=='\0' ? NULL : node_service;
-    if (!node && hints.ai_family == AF_UNSPEC)
-        hints.ai_family = AF_INET6;
+    node = (node_[0] == '\0' || node_[0] == '*') ? NULL : node_;
 
     rc = getaddrinfo(node, service, &hints, &result);
     if (rc != 0) {
@@ -269,26 +319,81 @@ int ListenTCP(const char *network, const char *address)
     }
 
     for (rp = result; rp != NULL; rp = rp->ai_next) {
-        fd = socket(rp->ai_family, rp->ai_socktype,
+        sockfd = socket(rp->ai_family, rp->ai_socktype,
                     rp->ai_protocol);
-        if (fd == -1)
+        if (sockfd == -1)
             continue;
 
-        if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
-            if (listen(fd, 128) == 0)
+        if (bind(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            if (listen(sockfd, 128) == 0)
                 break;
         }
-        close(fd);
+        close(sockfd);
     }
-
+    if (rp) {
+        printf("listen on %s %s, ", node_, service);
+        format_sockaddr(rp->ai_addr, node_, sizeof(node_));
+        printf("address : %s\n",node_);
+    }
     freeaddrinfo(result);           /* No longer needed */
-    return fd;
+    return rp ? sockfd : -1;
 }
 // if address is not null, bind address to the socket, so
 int ListenUDP(const char *network, const char *address)
 {
+    if (!network || !address) {
+        log_error("invalid parameters: network(%s), address(%s)",
+                  network, address);
+        return -1;
+    }
+    char node_[600], *node, service[32];
+    struct addrinfo hints;
+    struct addrinfo *result, *rp;
+    int rc, sockfd=-1;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE | AI_V4MAPPED;
+    if (strcmp(network, "udp") == 0) {
+        hints.ai_family = AF_UNSPEC;
+    } else if (strcmp(network, "udp4") == 0) {
+        hints.ai_family = AF_INET;
+    } else if (strcmp(network, "udp6") == 0) {
+        hints.ai_family = AF_INET6;
+    } else {
+        log_error("invalid network:%s\n", network);
+        return -1;
+    }
+    rc = split_address(address, node_, service);
+    if (rc != 0) {
+        log_error("bad address(%s)\n", address);
+        return -1;
+    }
+    node = (node_[0] == '\0' || node_[0] == '*') ? NULL : node_;
 
-    return -1;
+    rc = getaddrinfo(node, service, &hints, &result);
+    if (rc != 0) {
+        log_error("getaddrinfo: %s\n", gai_strerror(rc));
+        return -1;
+    }
+
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        sockfd = socket(rp->ai_family, rp->ai_socktype,
+                    rp->ai_protocol);
+        if (sockfd == -1)
+            continue;
+
+        if (bind(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;
+        }
+        close(sockfd);
+    }
+    if (rp) {
+        printf("listen on %s %s, ", node_, service);
+        format_sockaddr(rp->ai_addr, node_, sizeof(node_));
+        printf("address : %s\n",node_);
+    }
+    freeaddrinfo(result);           /* No longer needed */
+    return sockfd;
 }
 int ListenUnix(const char *network, const char *address)
 {

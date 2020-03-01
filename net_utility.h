@@ -6,6 +6,6 @@
 int set_default_sockopt(const char *network, int fd, char mode);
 // socket utilities
 // 0 : success, -1 fail
-int setblock(int socket_fd, bool block);
+int set_nonblock(int socket_fd);
 
 #endif
